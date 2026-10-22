@@ -1,8 +1,13 @@
 # Data and historical artifacts
 
 The original repository is preserved as a record of speech and vision coursework.
-Dataset collection, ownership, participant consent and redistribution terms have
-not yet been documented in the repository. No new dataset license is assigned by
+On 22 October 2026, the repository owner confirmed team authority, participant
+consent and dataset-owner permission for continued public redistribution and
+transfer, including retained Git history. They also confirmed that applicable
+course/institutional/employer/client/sponsor requirements are satisfied or do
+not apply.
+The specific dataset source/owner, collection details and any required credit or
+restrictions have not yet been supplied. No new dataset license is assigned by
 this cleanup.
 
 ## Current inputs
@@ -46,5 +51,7 @@ permission therefore need to cover the retained history as well as current files
 The cleanup's software tests use synthetic inputs and fake external dependencies.
 They do not transcribe the recordings, identify portrait subjects, validate
 participant consent, establish recognition accuracy or reproduce the historical
-experiments. Dataset source, required credit and any redistribution restrictions
-must be supplied by the owner before a professional-account transfer is finalized.
+experiments. The permission confirmation above is the owner's statement, not an
+independent verification of consent records. Dataset source and attribution
+details remain undocumented; no source or credit is inferred from filenames or
+workbook metadata.
