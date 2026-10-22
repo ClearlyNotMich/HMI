@@ -1,32 +1,27 @@
-# needed installs :
-# pip install speechbrain
-# pip install soundfile
-# pip install torchaudio
-# pip install pydub
-# pip install numpy
-# ffmmpeg libs in os vars
-# pip install openpyxl
+"""Explicit WAV transcription and offline text metrics for the HMI experiment.
 
-import os
-import re
-import time
-import torch
-import torchaudio
-from pydub import AudioSegment
+Importing this module does not load audio, optional dependencies, or models.
+Only the command-line entry point (or run_evaluation) starts model inference.
+"""
 
-import pandas as pd
-import numpy as np
+import argparse
 from collections import Counter
 from difflib import SequenceMatcher
+import math
+from pathlib import Path
+import re
+import time
 
-from speechbrain.pretrained import EncoderDecoderASR
+MODEL_ID = "speechbrain/asr-transformer-transformerlm-librispeech"
+REPOSITORY = Path(__file__).resolve().parent
+DEFAULT_REFERENCE = (
+    REPOSITORY
+    / "Speech Recognition Dataset"
+    / "speechrecognition Dataset v2"
+    / "speechrecognition dataset details.xlsx"
+)
+DEFAULT_MODEL_CACHE = REPOSITORY / "pretrained_models" / MODEL_ID.split("/")[-1]
 
-os.environ['HF_HUB_DISABLE_SYMLINKS'] = '1'
-current_directory = os.path.dirname(__file__)
-folder_name = 'audio'
-
-# Load ground truth from a .excel file
-reference_file = "speechrecognition dataset details.xlsx"  
 
 def levenshtein_distance(s1, s2):
     if len(s1) < len(s2):
@@ -48,71 +43,43 @@ def levenshtein_distance(s1, s2):
     return previous_row[-1]
 
 
-# Wer calculation from the powerpoint slides
 def calculate_wer(ref_words, hyp_words):
+    """Return exact word edit distance divided by reference token count.
 
-	# Counting the number of substitutions, deletions, and insertions
-	substitutions = sum(1 for ref, hyp in zip(ref_words, hyp_words) if ref != hyp)
-	deletions = len(ref_words) - len(hyp_words)
-	insertions = len(hyp_words) - len(ref_words)
- 
-	# Total number of words in the reference text
-	total_words = len(ref_words)
- 
-	# Calculating the Word Error Rate (WER)
-	wer = (substitutions + deletions + insertions) / total_words
-	return wer
+    Pass normalized, unpadded word sequences. Two empty sequences have WER 0;
+    a nonempty hypothesis with an empty reference is undefined and raises.
+    WER can exceed 1 when the hypothesis contains many insertions.
+    """
+    if not ref_words:
+        if not hyp_words:
+            return 0.0
+        raise ValueError("WER is undefined for an empty reference")
+    return levenshtein_distance(ref_words, hyp_words) / len(ref_words)
 
-# Wer calculation that way more accurate acording to python book and numpy website
+
 def calculate_wer2(ref_words, hyp_words):
-    # Initialize a matrix with size |ref_words|+1 x |hyp_words|+1
-    # The extra row and column are for the case when one of the strings is empty
-    d = np.zeros((len(ref_words) + 1, len(hyp_words) + 1))
-    # The number of operations for an empty hypothesis to become the reference
-    # is just the number of words in the reference (i.e., deleting all words)
-    for i in range(len(ref_words) + 1):
-        d[i, 0] = i
-    # The number of operations for an empty reference to become the hypothesis
-    # is just the number of words in the hypothesis (i.e., inserting all words)
-    for j in range(len(hyp_words) + 1):
-        d[0, j] = j
-    # Iterate over the words in the reference and hypothesis
-    for i in range(1, len(ref_words) + 1):
-        for j in range(1, len(hyp_words) + 1):
-            # If the current words are the same, no operation is needed
-            # So we just take the previous minimum number of operations
-            if ref_words[i - 1] == hyp_words[j - 1]:
-                d[i, j] = d[i - 1, j - 1]
-            else:
-                # If the words are different, we consider three operations:
-                # substitution, insertion, and deletion
-                # And we take the minimum of these three possibilities
-                substitution = d[i - 1, j - 1] + 1
-                insertion = d[i, j - 1] + 1
-                deletion = d[i - 1, j] + 1
-                d[i, j] = min(substitution, insertion, deletion)
-    # The minimum number of operations to transform the hypothesis into the reference is in the bottom-right cell of the matrix We divide this by the number of words in the reference to get the WER
-    wer = d[len(ref_words), len(hyp_words)] / len(ref_words)
-    return wer
+    """Compatibility name for the same exact WER calculation."""
+    return calculate_wer(ref_words, hyp_words)
+
 
 def preprocess(text):
-    # Lowercase the text
-    text = text.lower()
-    # Remove punctuation and extra whitespaces
-    text = re.sub(r"[^\w\s]", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text
+    """Keep the original lowercase/punctuation normalization, trimming spaces."""
+    text = re.sub(r"[^\w\s]", "", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def similar(a, b):
     # Define a similarity threshold
     threshold = 0.6
     return SequenceMatcher(None, a, b).ratio() > threshold
 
+
 def find_best_alignment(current_word, other_words, look_ahead_limit=3):
     for offset in range(1, min(look_ahead_limit + 1, len(other_words))):
         if similar(current_word, other_words[offset]):
             return offset
     return 0
+
 
 def align_texts(reference, hypothesis):
     # Normalize reference and hypothesis texts
@@ -137,8 +104,12 @@ def align_texts(reference, hypothesis):
             i += 1
             j += 1
         else:
-            ref_look_ahead = find_best_alignment(reference_words[i], hypothesis_words[j:], 3)
-            hyp_look_ahead = find_best_alignment(hypothesis_words[j], reference_words[i:], 3)
+            ref_look_ahead = find_best_alignment(
+                reference_words[i], hypothesis_words[j:], 3
+            )
+            hyp_look_ahead = find_best_alignment(
+                hypothesis_words[j], reference_words[i:], 3
+            )
 
             if ref_look_ahead > 0:
                 align_ref.append("")
@@ -165,251 +136,283 @@ def align_texts(reference, hypothesis):
         j += 1
 
     # Printing aligned words side by side for visual confirmation
-    print("align_ref - align_hyp")
+    print("Heuristic alignment diagnostic (not used for WER):")
     for ref, hyp in zip(align_ref, align_hyp):
         print(f"{ref.ljust(15)} - {hyp}")
 
     return align_ref, align_hyp
 
+
 def load_wav_files_from_folder(folder_path):
-    """
-    Function to load all .wav files from a specified folder.
+    """Return sorted WAV filenames from one directory, without decoding audio."""
+    folder = Path(folder_path).expanduser().resolve(strict=True)
+    if not folder.is_dir():
+        raise NotADirectoryError(folder)
+    files = sorted(
+        path.name
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() == ".wav"
+    )
+    if not files:
+        raise ValueError(f"No WAV files found in {folder}")
+    return files
 
-    Args:
-    folder_path (str): Path to the folder containing the .wav files.
 
-    Returns:
-    list: A list of .wav file names found in the folder.
-    """
-    wav_files = []
+def _transcriptions_from_rows(rows):
+    """Read task rows up to the bundled workbooks' explicit 'type:' footer."""
+    rows = iter(rows)
+    headers = next(rows, ())
+    if headers.count("ID") != 1 or headers.count("Sentence") != 1:
+        raise ValueError("Reference workbook must contain ID and Sentence columns")
+    id_index, sentence_index = headers.index("ID"), headers.index("Sentence")
+    references = {}
+    for number, row in enumerate(rows, 2):
+        if not any(value is not None for value in row):
+            continue
+        if len(row) <= max(id_index, sentence_index):
+            raise ValueError(f"Incomplete reference row {number}")
+        task_id, sentence = row[id_index], row[sentence_index]
+        # The bundled workbooks put speaker metadata below this section marker.
+        # Other nonnumeric IDs remain errors; blank rows alone do not hide them.
+        if isinstance(task_id, str) and task_id.strip().lower() == "type:":
+            break
+        if isinstance(task_id, bool):
+            raise ValueError(f"Invalid task ID in reference row {number}")
+        if isinstance(task_id, str) and task_id.strip().isdigit():
+            task_id = int(task_id)
+        elif isinstance(task_id, (int, float)) and math.isfinite(task_id):
+            if task_id != int(task_id):
+                raise ValueError(f"Invalid task ID in reference row {number}")
+            task_id = int(task_id)
+        else:
+            raise ValueError(f"Invalid task ID in reference row {number}")
+        if task_id <= 0:
+            raise ValueError(f"Invalid task ID in reference row {number}")
+        if not isinstance(sentence, str) or not preprocess(sentence).split():
+            raise ValueError(f"Empty or invalid sentence in reference row {number}")
+        if task_id in references:
+            raise ValueError(f"Duplicate reference task ID: {task_id}")
+        references[task_id] = sentence
+    if not references:
+        raise ValueError("Reference workbook contains no transcriptions")
+    return references
 
-    # Iterate over files in the specified folder
-    for file in os.listdir(folder_path):
-        # Check if the file is a .wav file
-        if file.endswith(".wav"):
-            wav_files.append(file)
-
-    return wav_files
 
 def load_transcriptions_from_excel(excel_path):
-    """
-    Function to load transcription ground truths from an Excel file.
+    """Read the first worksheet's ID/Sentence columns; propagate input errors."""
+    path = Path(excel_path).expanduser().resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Reference workbook is not a file: {path}")
+    from openpyxl import load_workbook
 
-    Args:
-    excel_path (str): Path to the Excel file.
-
-    Returns:
-    DataFrame: A pandas DataFrame containing the transcriptions with 'ID' and 'Sentence' columns.
-    """
-    # Read the Excel file into a DataFrame
+    workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        df = pd.read_excel(excel_path, usecols=['ID', 'Sentence'])
+        return _transcriptions_from_rows(
+            workbook.worksheets[0].iter_rows(values_only=True)
+        )
+    finally:
+        workbook.close()
 
-        # Cleaning the DataFrame to remove unnecessary columns
-        df = df[['ID', 'Sentence']].dropna()
 
-        return df
-    except Exception as e:
-        print(e)
-        return f"An error occurred: {e}"
+def select_transcription_for_audio_file(audio_file, transcriptions):
+    """Match the original task<number> filename convention to a reference."""
+    match = re.search(r"task(\d+)", Path(audio_file).name, flags=re.IGNORECASE)
+    if not match:
+        raise ValueError(f"WAV filename has no task number: {audio_file}")
+    task_id = int(match.group(1))
+    if task_id not in transcriptions:
+        raise ValueError(f"No reference for task {task_id}: {audio_file}")
+    reference = transcriptions[task_id]
+    if not isinstance(reference, str) or not preprocess(reference).split():
+        raise ValueError(f"Empty reference for task {task_id}")
+    return reference
 
-def select_transcription_for_audio_file(audio_file, transcriptions_df):
-    """
-    Function to select the correct transcription for a given audio file based on the task number in the file name.
-
-    Args:
-    audio_file (str): The audio file name.
-    transcriptions_df (DataFrame): DataFrame containing transcription data with 'ID' and 'Sentence' columns.
-
-    Returns:
-    str: The corresponding transcription sentence for the given audio file.
-    """
-    # Extract the task ID from the audio file name
-    match = re.search(r"task(\d+)", audio_file)
-    if match:
-        task_id = int(match.group(1))  # Convert the extracted ID to an integer
-
-        # Find the corresponding transcription
-        transcription = transcriptions_df[transcriptions_df['ID'] == task_id]['Sentence'].values
-        if transcription.size > 0:
-            return transcription[0]
-
-    return "No matching transcription found"
 
 def calculate_recall_precision_fscore(hypothesis, reference):
-    # Count occurrences in both lists
-    hyp_count = Counter(hypothesis)
-    ref_count = Counter(reference)
+    """Return aggregate exact-match scores for a supplied heuristic alignment.
 
-    # Calculate true positives (words in both hypothesis and reference)
-    true_positives = 0
-
-    for index, element in enumerate(hypothesis):
-        if hypothesis[index] == reference[index]:
-            true_positives += 1
-
-    # Exclude empty strings from the hypothesis count
-    if "" in hyp_count:
-        del hyp_count[""]
-
-    # Exclude empty strings from the reference count
-    if "" in ref_count:
-        del ref_count[""]
-
-    # Calculate total number of predicted and actual words
-    total_predicted = sum(hyp_count.values())
-    total_actual = sum(ref_count.values())
-
-    # Calculate precision and recall
-    precision = true_positives / total_predicted if total_predicted > 0 else 0
-    recall = true_positives / total_actual if total_actual > 0 else 0
-
-    # Calculate F-score
-    if recall + precision > 0:
-        f_score = 2 * (precision * recall) / (precision + recall)
-    else:
-        f_score = 0
-
+    Blank alignment cells are excluded. These are diagnostics of that alignment,
+    not macro-averaged scores or the edit-distance alignment used by WER.
+    """
+    true_positives = sum(
+        bool(hyp) and hyp == ref for hyp, ref in zip(hypothesis, reference)
+    )
+    total_predicted = sum(bool(word) for word in hypothesis)
+    total_actual = sum(bool(word) for word in reference)
+    precision = true_positives / total_predicted if total_predicted else 0.0
+    recall = true_positives / total_actual if total_actual else 0.0
+    f_score = (
+        2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    )
     return recall, precision, f_score
 
-def ai_magic(current_directory,folder_name ,audio_file, reference):
-
-    path = os.path.join(current_directory, folder_name, audio_file)
-
-    waveform, sample_rate = torchaudio.load(path)
-
-    # Run speech recognition on GPU
-    run_opts={"device":"cuda"}
-
-    # Initialize the speech recognition model
-    asr_model = EncoderDecoderASR.from_hparams(source="speechbrain/asr-transformer-transformerlm-librispeech", savedir="pretrained_models/asr-transformer-transformerlm-librispeech", run_opts=run_opts)
-    # asr_model = EncoderDecoderASR.from_hparams(source="speechbrain/asr-crdnn-commonvoice-14-en", savedir="pretrained_models/speechbrain/asr-crdnn-commonvoice-14-en", run_opts=run_opts)
-
-    print("-----------------")
-    print("Loaded Model OK - Performing Transcription on:   " + audio_file)
-    print("-----------------")
-
-    # Start timing the transcription
-    start_time = time.time()
-
-    # Perform transcription
-    hypothesis = asr_model.transcribe_file(path)
-
-    # End timing the transcription
-    end_time = time.time()
-
-    # Calculate transcription time and audio duration
-    transcription_time = end_time - start_time
-
-    audio_duration = len(waveform[0]) / sample_rate  # Calculate audio duration in seconds
-
-    # Calculate Real-Time Factor (RTF)
-    rtf = transcription_time / audio_duration
-
-    print("-----------------")
-    print("Transcription Time:", transcription_time, "seconds")
-    print("Audio Duration:", audio_duration, "seconds")
-    print("Real Time Factor (RTF):", rtf)
-    
-    output(reference=reference, hypothesis=hypothesis)
 
 def calculate_for_word(target_words, hypothesis, reference):
-    print("-----------------")
-    print("Now performing calculations for the specified target words: ")
-
+    """Print the original target-word diagnostics using nonblank exact matches."""
     hyp_count = Counter(hypothesis)
     ref_count = Counter(reference)
-
     for word in target_words:
-        tp = 0
-        for index, element in enumerate(hypothesis):
-            if element == word and hypothesis[index] == reference[index]:
-              tp += 1
-
-
-        word_hyp_count = hyp_count[word]
-        word_ref_count = ref_count[word]
-
-        # Recall for the word
-        recall = tp / word_ref_count if word_ref_count > 0 else 0
-
-        # Precision for the word
-        precision = tp / word_hyp_count if word_hyp_count > 0 else 0
-
-        # F-score for the word
-        if recall + precision > 0:
-            f_score = 2 * (precision * recall) / (precision + recall)
-        else:
-            f_score = 0
-
-        print("-----------------")
-        print(f"Word: {word}")
-        print("Recall:", recall)
-        print("Precision:", precision)
-        print("F-score:", f_score)
-
-
-def mp3_to_wav():
-    # Check if the file is mp3
-    if file_path.endswith('.mp3'):
-        # Convert mp3 to wav
-        audio = AudioSegment.from_mp3(file_path)
-        # Change the file path to wav
-        file_path = file_path.replace('.mp3', '.wav')
-        # Export as wav
-        audio.export(file_path, format='wav')
-
-    # Load file in wav since we are windows
-    return torchaudio.load(file_path)
+        if not word:
+            continue
+        tp = sum(hyp == ref == word for hyp, ref in zip(hypothesis, reference))
+        recall = tp / ref_count[word] if ref_count[word] else 0.0
+        precision = tp / hyp_count[word] if hyp_count[word] else 0.0
+        f_score = (
+            2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        )
+        print(
+            f"Heuristic aligned word {word!r}: recall={recall}, precision={precision}, F-score={f_score}"
+        )
 
 
 def output(reference, hypothesis):
+    """Print exact text metrics separately from the original fuzzy diagnostic."""
+    normalized_ref = preprocess(reference)
+    normalized_hyp = preprocess(hypothesis)
+    wer = calculate_wer(normalized_ref.split(), normalized_hyp.split())
+    character_distance = levenshtein_distance(normalized_ref, normalized_hyp)
     print("-----------------")
-    print("Reference: " + reference)
-    print(" ")
-    print("Hypothesis: " + hypothesis)
-
-    reference, hypothesis  = align_texts(reference=reference, hypothesis=hypothesis)
-    
-
-    wer = calculate_wer2(ref_words=reference, hyp_words=hypothesis)
-    wcr = 1 - wer
-
-    print("-----------------")
-    print("Word Error Rate (WER):", calculate_wer(ref_words=reference, hyp_words=hypothesis))
-    print("Accurate Word Error Rate (AWER):", wer)
-    print("Word Correct Rate (WCR):", wcr)
-
-    # Calculate Levenshtein Distance
-    lev_distance = levenshtein_distance(" ".join(reference), " ".join(hypothesis))
-    print("-----------------")
-    print("Levenshtein Distance:", lev_distance)
-
-
-    calculate_for_word(hypothesis=hypothesis, reference=reference, target_words=["our", "the"])
-    
-    recall, precision, f_score = calculate_recall_precision_fscore(hypothesis=hypothesis, reference=reference)
-
-    print("-----------------")
-    print("Macro Recall:", recall)
-    print("Macro Precision:", precision)
-    print("Macro F-score:", f_score)
+    print("Reference:", reference)
+    print("Hypothesis:", hypothesis)
+    print("Word Error Rate (WER):", wer)
+    print("Word accuracy (1 - WER; can be negative):", 1 - wer)
+    print("Normalized character Levenshtein distance:", character_distance)
+    aligned_ref, aligned_hyp = align_texts(reference, hypothesis)
+    recall, precision, f_score = calculate_recall_precision_fscore(
+        aligned_hyp, aligned_ref
+    )
+    calculate_for_word(["our", "the"], aligned_hyp, aligned_ref)
+    print("Heuristic alignment aggregate recall:", recall)
+    print("Heuristic alignment aggregate precision:", precision)
+    print("Heuristic alignment aggregate F-score:", f_score)
+    return {
+        "wer": wer,
+        "word_accuracy": 1 - wer,
+        "character_distance": character_distance,
+    }
 
 
-fake_ref = "Additionally, our innovative pipeline includes more than twenty active development programs for blood cancers and solid tumors, which we expect will strengthen our growing position in oncology."
-fake_hypo = "Addition ally, or innovative pipeline includes more than twenty active develop mint programs for blood cancers solid tumors, which we will strengthen our glowing positioning oncology"
-pp_ref = "The cat sat on the mat at the door"
-pp_hypo = "She rat the sat the mat at door"
+def get_audio_duration(audio_path):
+    """Validate a WAV header and its duration without loading the waveform."""
+    from soundfile import info
+
+    try:
+        details = info(str(audio_path))
+    except (RuntimeError, OSError) as error:
+        raise ValueError(f"Cannot read WAV header: {audio_path}") from error
+    if details.format not in {"WAV", "WAVEX", "RF64"}:
+        raise ValueError(f"Input is not a WAV audio file: {audio_path}")
+    duration = float(details.duration)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"WAV has no positive finite duration: {audio_path}")
+    return duration
 
 
-# output(reference=fake_ref, hypothesis=fake_hypo)
+def create_asr_model(device, model_cache):
+    """Explicitly load the original SpeechBrain model, downloading if needed."""
+    if device == "cuda":
+        import torch
 
-reference_file_path = os.path.join(current_directory, reference_file)
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA is unavailable; use --device cpu")
+    from speechbrain.inference.ASR import EncoderDecoderASR
 
-df_ref = load_transcriptions_from_excel(reference_file_path)
-audio_files = load_wav_files_from_folder(folder_path=os.path.join(current_directory, folder_name))
+    return EncoderDecoderASR.from_hparams(
+        source=MODEL_ID,
+        savedir=str(model_cache),
+        run_opts={"device": device},
+    )
 
-for audio in audio_files:
-    reference = select_transcription_for_audio_file(audio_file=audio,transcriptions_df=df_ref)
-    ai_magic(current_directory=current_directory, folder_name=folder_name, audio_file=audio, reference=reference)
-    torch.cuda.empty_cache()
+
+def run_evaluation(
+    audio_dir,
+    reference_path=DEFAULT_REFERENCE,
+    *,
+    device="cpu",
+    model_cache=DEFAULT_MODEL_CACHE,
+):
+    """Validate every local input, then load one model and evaluate sorted WAVs.
+
+    Only direct children of audio_dir are evaluated. Model-loading time is
+    excluded from each transcription's real-time factor, as in the original.
+    """
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be cpu or cuda")
+    audio_dir = Path(audio_dir).expanduser().resolve(strict=True)
+    filenames = load_wav_files_from_folder(audio_dir)
+    references = load_transcriptions_from_excel(reference_path)
+    inputs = [
+        (audio_dir / name, select_transcription_for_audio_file(name, references))
+        for name in filenames
+    ]
+    model_cache = Path(model_cache).expanduser().resolve()
+    if model_cache.exists() and not model_cache.is_dir():
+        raise ValueError(f"Model cache is not a directory: {model_cache}")
+    # Validate all headers before any model download or inference can begin.
+    prepared = [
+        (path, reference, get_audio_duration(path)) for path, reference in inputs
+    ]
+    model = create_asr_model(device, model_cache)
+    results = []
+    for path, reference, duration in prepared:
+        start = time.perf_counter()
+        hypothesis = model.transcribe_file(str(path))
+        elapsed = time.perf_counter() - start
+        print("-----------------")
+        print("Audio file:", path.name)
+        print("Transcription time (seconds):", elapsed)
+        print("Audio duration (seconds):", duration)
+        print("Real-time factor (RTF):", elapsed / duration)
+        metrics = output(reference, hypothesis)
+        results.append(
+            {
+                "audio_file": path.name,
+                "hypothesis": hypothesis,
+                "transcription_time": elapsed,
+                "audio_duration": duration,
+                "rtf": elapsed / duration,
+                **metrics,
+            }
+        )
+    return results
+
+
+def main(argv=None):
+    """Run only when explicitly requested; --help needs no optional packages."""
+    parser = argparse.ArgumentParser(
+        description="Evaluate local WAV files with SpeechBrain (may download model weights).",
+    )
+    parser.add_argument(
+        "--audio-dir",
+        required=True,
+        type=Path,
+        help="directory of task<number>*.wav files",
+    )
+    parser.add_argument(
+        "--reference",
+        type=Path,
+        default=DEFAULT_REFERENCE,
+        help="Excel workbook with ID and Sentence columns",
+    )
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument(
+        "--model-cache",
+        type=Path,
+        default=DEFAULT_MODEL_CACHE,
+        help="directory for downloaded model files",
+    )
+    args = parser.parse_args(argv)
+    try:
+        run_evaluation(
+            args.audio_dir,
+            args.reference,
+            device=args.device,
+            model_cache=args.model_cache,
+        )
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

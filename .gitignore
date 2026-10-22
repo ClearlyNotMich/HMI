@@ -9,4 +9,11 @@ image\p
 image/geenportretten/
 HMI Vision data set extended.zip
 eigenface_model.yml
-eigenface_model.yml
+
+# Local environments and generated experiment output.
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+outputs/

@@ -1,0 +1,7 @@
+# Direct runtime dependencies; this is not a tested environment lock.
+# Install a mutually compatible torch/torchaudio pair for your CPU or CUDA setup.
+speechbrain>=1.0
+torch
+torchaudio
+openpyxl
+soundfile
