@@ -1,94 +1,88 @@
-import cv2
-import os
-import numpy as np
-import shutil
-
-def read_annotations(annotations_path):
-    annotations = {}
-    with open(annotations_path, 'r') as file:
-        for line in file:
-            parts = line.strip().split(' ')
-            image_path = parts[0]
-            # Assuming the format is: [image_path x y width height]
-            x, y, width, height = map(int, parts[2:6])
-            annotations[image_path] = (x, y, width, height)
-    return annotations
-
-def create_cropped_image_dirs(original_path, cropped_path):
-    if os.path.exists(cropped_path):
-        shutil.rmtree(cropped_path)  # Remove the directory if it already exists
-    os.makedirs(cropped_path)  # Create the root directory for cropped images
-
-    for root, dirs, _ in os.walk(original_path):
-        for dirname in dirs:
-            dirpath = os.path.join(root, dirname)
-            relative_path = os.path.relpath(dirpath, original_path)
-            new_dirpath = os.path.join(cropped_path, relative_path)
-            os.makedirs(new_dirpath)
-
-def get_images_and_labels(path, annotations, cropped_path, standard_size=(100, 100)):
-    images = []
-    labels = []
-    label_dict = {}
-    current_label = 0
-
-    for dirname, _, filenames in os.walk(path):
-        person_name = os.path.basename(dirname)
-        if person_name not in label_dict:
-            label_dict[person_name] = current_label
-            current_label += 1
-
-        for filename in filenames:
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                img_path = os.path.join(dirname, filename)
-                if img_path in annotations:
-                    x, y, w, h = annotations[img_path]
-                    img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-
-                    if img is None:
-                        print(f"Warning: Unable to read image at {img_path}")
-                        continue
-
-                    if y + h > img.shape[0] or x + w > img.shape[1]:
-                        print(f"Warning: Annotation for {img_path} is out of bounds.")
-                        continue
-
-                    face = img[y:y+h, x:x+w]
-                    if face.size == 0:
-                        print(f"Warning: No face detected in {img_path}")
-                        continue
-
-                    resized_face = cv2.resize(face, standard_size)
-                    images.append(resized_face)
-                    labels.append(label_dict[person_name])
-
-                    # Save the resized cropped image in the corresponding new directory
-                    relative_dir = os.path.relpath(dirname, path)
-                    cropped_img_path = os.path.join(cropped_path, relative_dir, filename)
-                    cv2.imwrite(cropped_img_path, resized_face)
-
-    return images, np.array(labels)
+"""Explicit EigenFace training from annotated crops; original images are read-only."""
+import argparse
+import json
+from pathlib import Path
+from vision_data import (
+    ANNOTATIONS, FACE_SIZE, POSITIVE_DIR, ROOT, box_in_bounds,
+    fresh_output_directory, load_cv2, read_annotations, require_complete, write_json,
+)
 
 
-# Paths
-dataset_path = r'F:\Code\HMIvoice\image\p'
-cropped_dataset_path = r'F:\Code\HMIvoice\image\p_cropped'
-annotations_path = r'F:\Code\HMIvoice\positives.txt'
+def prepare_training_data(audit, cv2):
+    """Decode valid crops; assign stable labels to their first person folder."""
+    samples, issues = [], []
+    for row in audit.rows:
+        parts = Path(row.relative).parts
+        if len(parts) < 2:
+            issues.append(f"{row.relative}: expected a person subdirectory")
+            continue
+        image = cv2.imread(str(row.image), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            issues.append(f"{row.relative}: image could not be decoded")
+            continue
+        for index, box in enumerate(row.boxes):
+            if not box_in_bounds(box, image.shape):
+                issues.append(f"{row.relative}: rectangle {index + 1} is outside image bounds")
+                continue
+            x, y, width, height = box
+            crop = cv2.resize(image[y:y + height, x:x + width], FACE_SIZE)
+            samples.append((parts[0], row.relative, index, crop))
+    labels = {name: index for index, name in enumerate(sorted({s[0] for s in samples}))}
+    return samples, labels, issues
 
-# Create directories for cropped images
-create_cropped_image_dirs(dataset_path, cropped_dataset_path)
 
-# Read the annotations
-annotations = read_annotations(annotations_path)
+def train(dataset=POSITIVE_DIR, annotations=ANNOTATIONS, output=ROOT / "outputs/vision/eigen",
+          allow_incomplete=False, *, cv2_module=None, numpy_module=None):
+    audit = read_annotations(annotations, dataset)
+    require_complete(audit, allow_incomplete)
+    cv2 = cv2_module if cv2_module is not None else load_cv2()
+    if not hasattr(cv2, "face") or not hasattr(cv2.face, "EigenFaceRecognizer_create"):
+        raise RuntimeError("EigenFace training requires OpenCV's contrib face module")
+    samples, labels, image_issues = prepare_training_data(audit, cv2)
+    if image_issues and not allow_incomplete:
+        raise ValueError("image validation failed: " + "; ".join(image_issues))
+    if not samples:
+        raise ValueError("no valid annotated face crops are available")
+    if numpy_module is None:
+        import numpy as numpy_module
+    output = fresh_output_directory(output, (dataset,))
+    crops = output / "crops"
+    crops.mkdir()
+    for number, (_, _, _, image) in enumerate(samples):
+        if not cv2.imwrite(str(crops / f"{number:06d}.png"), image):
+            raise OSError("OpenCV could not write a generated face crop")
+    model = cv2.face.EigenFaceRecognizer_create()
+    model.train([sample[3] for sample in samples],
+                numpy_module.asarray([labels[sample[0]] for sample in samples], dtype=numpy_module.int32))
+    model.save(str(output / "eigenface_model.yml"))
+    if not (output / "eigenface_model.yml").is_file():
+        raise OSError("OpenCV did not write the trained model")
+    metadata = {
+        "schema_version": 1, "face_size": list(FACE_SIZE), "grayscale": True,
+        "labels": {str(label): name for name, label in labels.items()},
+        "annotation_audit": audit.summary(), "issues": audit.issues + image_issues,
+        "training_samples": [{"image": relative, "rectangle": index + 1, "label": labels[person]}
+                             for person, relative, index, _ in samples],
+    }
+    write_json(output / "labels.json", metadata)
+    return metadata
 
-# Prepare the dataset with cropped images
-images, labels = get_images_and_labels(dataset_path, annotations, cropped_dataset_path)
 
-# Create an EigenFace Recognizer
-model = cv2.face.EigenFaceRecognizer_create()
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default=POSITIVE_DIR)
+    parser.add_argument("--annotations", default=ANNOTATIONS)
+    parser.add_argument("--output", default=ROOT / "outputs/vision/eigen",
+                        help="new output directory; never overwritten")
+    parser.add_argument("--allow-incomplete", action="store_true",
+                        help="explicitly accept reported missing/invalid inputs")
+    args = parser.parse_args(argv)
+    metadata = train(args.dataset, args.annotations, args.output, args.allow_incomplete)
+    print(json.dumps({"training_samples": len(metadata["training_samples"]),
+                      "annotation_audit": metadata["annotation_audit"],
+                      "image_or_annotation_issues": len(metadata["issues"])}, indent=2))
+    return 0
 
-# Train the model
-model.train(images, labels)
 
-# Save the model
-model.save("eigenface_model.yml")
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,4 @@
+# GUI demos and cv2.face require the contrib desktop package.
+# Install one OpenCV wheel variant per environment, not multiple variants.
+opencv-contrib-python
+numpy

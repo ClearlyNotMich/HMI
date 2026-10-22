@@ -1,14 +1,26 @@
-import os
+"""Audit annotation paths/counts without decoding images or importing OpenCV."""
+import argparse
+import json
+from vision_data import ANNOTATIONS, POSITIVE_DIR, read_annotations
 
-def check_paths(file_path):
-    with open(file_path, 'r') as file:
-        for line in file:
-            # Assuming each line starts with the file path, followed by space-separated values
-            image_path = line.split()[0]
 
-            # Check if the file exists
-            if not os.path.isfile(image_path):
-                print(f"File not found: {image_path}")
+def check_paths(file_path=ANNOTATIONS, dataset=POSITIVE_DIR):
+    return read_annotations(file_path, dataset)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--annotations", default=ANNOTATIONS)
+    parser.add_argument("--dataset", default=POSITIVE_DIR)
+    parser.add_argument("--details", action="store_true", help="include individual issues")
+    args = parser.parse_args(argv)
+    audit = check_paths(args.annotations, args.dataset)
+    result = audit.summary()
+    if args.details:
+        result["issues"] = audit.issues
+    print(json.dumps(result, indent=2))
+    return 1 if audit.issues else 0
+
 
 if __name__ == "__main__":
-    check_paths('positives.txt')
+    raise SystemExit(main())
