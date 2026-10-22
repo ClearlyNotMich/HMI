@@ -6,9 +6,10 @@ consent and dataset-owner permission for continued public redistribution and
 transfer, including retained Git history. They also confirmed that applicable
 course/institutional/employer/client/sponsor requirements are satisfied or do
 not apply.
-The specific dataset source/owner, collection details and any required credit or
-restrictions have not yet been supplied. No new dataset license is assigned by
-this cleanup.
+The owner states that the speech recordings and portrait images were supplied
+by the university for coursework. The original dataset creators, collection
+details and any specific attribution wording or redistribution restrictions
+have not been identified. No new dataset license is assigned by this cleanup.
 
 ## Current inputs
 
@@ -52,6 +53,6 @@ The cleanup's software tests use synthetic inputs and fake external dependencies
 They do not transcribe the recordings, identify portrait subjects, validate
 participant consent, establish recognition accuracy or reproduce the historical
 experiments. The permission confirmation above is the owner's statement, not an
-independent verification of consent records. Dataset source and attribution
-details remain undocumented; no source or credit is inferred from filenames or
-workbook metadata.
+independent verification of consent records. The university-supplied origin is
+recorded from that statement; further creator or attribution details are not
+inferred from filenames or workbook metadata.
